@@ -27,6 +27,7 @@ members = [
     (3, 4)
 ]
 
+num_nodes = len(nodes)
 num_members = len(members)
 
 # Material properties
@@ -60,6 +61,12 @@ def calculate_length(node1, node2):
     x2, y2 = nodes[node2]
     return np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
 
+def calculate_angle(node1, node2):
+    x1, y1 = nodes[node1]
+    x2, y2 = nodes[node2]
+    length = calculate_length(node1, node2)
+    return ( (x2 - x1) / length, (y2 - y1) / length )
+
 def initialize_population():
     population = []
     for _ in range(POPULATION_SIZE):
@@ -67,33 +74,108 @@ def initialize_population():
         population.append(individual)
     return population
 
+def total_weight(individual):
+    lengths = [calculate_length(m[0], m[1]) for m in members]
+    volume = individual * np.array(lengths)
+    return np.sum(volume * density)
+
+def build_stiffness_matrix(individual):
+    size = 2 * num_nodes
+    K = np.zeros((size, size))
+    
+    for i, (n1, n2) in enumerate(members):
+        L = calculate_length(n1, n2)
+        cos, sin = calculate_angle(n1, n2)
+        A = individual[i]
+        k = (A * E) / L
+        # Stiffness matrix for member i
+        k_matrix = k * np.array([
+            [cos*cos, cos*sin, -cos*cos, -cos*sin],
+            [cos*sin, sin*sin, -cos*sin, -sin*sin],
+            [-cos*cos, -cos*sin, cos*cos, cos*sin],
+            [-cos*sin, -sin*sin, cos*sin, sin*sin]
+        ])
+        # Indices in global stiffness matrix
+        index_map = [
+            2*n1, 2*n1+1,
+            2*n2, 2*n2+1
+        ]
+        for row in range(4):
+            for col in range(4):
+                K[index_map[row], index_map[col]] += k_matrix[row, col]
+    return K
+
+def apply_boundary_conditions(K, F, fixed_dofs):
+    # Modify K and F to apply boundary conditions
+    for dof in fixed_dofs:
+        K[dof, :] = 0
+        K[:, dof] = 0
+        K[dof, dof] = 1
+        F[dof] = 0
+    return K, F
+
+def solve_displacements(K, F):
+    try:
+        displacements = np.linalg.solve(K, F)
+        return displacements
+    except np.linalg.LinAlgError:
+        return None
+
+def calculate_axial_forces(individual, displacements):
+    axial_forces = []
+    for i, (n1, n2) in enumerate(members):
+        L = calculate_length(n1, n2)
+        cos, sin = calculate_angle(n1, n2)
+        A = individual[i]
+        k = (A * E) / L
+        index = [2*n1, 2*n1+1, 2*n2, 2*n2+1]
+        u = displacements[index]
+        # Calculate axial force
+        force = k * ( (u[2] - u[0]) * cos + (u[3] - u[1]) * sin )
+        axial_forces.append(force)
+    return np.array(axial_forces)
+
 def fitness(individual):
     try:
-        # Calculate axial forces and check constraints
-        axial_forces = analyze_truss(individual)
-        stress = axial_forces * calculate_length_forces(individual) / individual / 1e6  # in MPa
-        if np.any(np.abs(stress) > sigma_max / 1e6):
-            return 1e6  # Penalize if stress exceeds limit
+        # Calculate total weight
         weight = total_weight(individual)
+        
+        # Build stiffness matrix
+        K = build_stiffness_matrix(individual)
+        
+        # Build load vector
+        F = np.zeros(2 * num_nodes)
+        for node, load in loads.items():
+            F[2*node] = load[0]
+            F[2*node+1] = load[1]
+        
+        # Define fixed degrees of freedom
+        fixed_dofs = []
+        for node in supports:
+            fixed_dofs.extend([2*node, 2*node+1])
+        
+        # Apply boundary conditions
+        K_mod, F_mod = apply_boundary_conditions(K, F, fixed_dofs)
+        
+        # Solve for displacements
+        displacements = solve_displacements(K_mod, F_mod)
+        if displacements is None:
+            return 1e6  # Penalize infeasible solutions
+        
+        # Calculate axial forces
+        axial_forces = calculate_axial_forces(individual, displacements)
+        
+        # Calculate stresses
+        stresses = axial_forces / individual  # σ = F / A
+        
+        # Check stress constraints
+        if np.any(np.abs(stresses) > sigma_max):
+            penalty = np.sum(np.abs(stresses[np.abs(stresses) > sigma_max]) - sigma_max)
+            return weight + penalty * 1e3  # Penalize overweight solutions
+        
         return weight
     except:
         return 1e6  # Penalize infeasible solutions
-
-def calculate_length_forces(individual):
-    lengths = [calculate_length(m[0], m[1]) for m in members]
-    return np.array(lengths)
-
-def total_weight(individual):
-    lengths = calculate_length_forces(individual)
-    volume = individual * lengths
-    return np.sum(volume * density)
-
-def analyze_truss(individual):
-    # Placeholder for truss analysis
-    # For simplicity, assume axial forces are proportional to area
-    # In a real scenario, perform equilibrium and compatibility equations
-    # Here we return random forces within allowable limits
-    return np.random.uniform(-sigma_max, sigma_max, num_members)
 
 def selection(population, fitnesses):
     # Tournament selection
@@ -118,7 +200,7 @@ def crossover(parent1, parent2):
 def mutate(individual):
     for i in range(num_members):
         if random.random() < MUTATION_RATE:
-            individual[i] = np.clip(individual[i] + np.random.normal(0, 0.001), A_MIN, A_MAX)
+            individual[i] = np.clip(individual[i] + np.random.normal(0, 0.0005), A_MIN, A_MAX)
     return individual
 
 def genetic_algorithm():
@@ -132,11 +214,11 @@ def genetic_algorithm():
         avg_fitness = np.mean(fitnesses)
         best_fitness_history.append(best_fitness)
         avg_fitness_history.append(avg_fitness)
-        print(f"Generation {generation}: Best Fitness = {best_fitness:.2f}, Average Fitness = {avg_fitness:.2f}")
+        print(f"Generation {generation+1}: Best Fitness = {best_fitness:.2f} kg, Average Fitness = {avg_fitness:.2f} kg")
 
         # Elitism
-        sorted_population = [x for _, x in sorted(zip(fitnesses, population), key=lambda pair: pair[0])]
-        new_population = sorted_population[:ELITE_SIZE]
+        sorted_indices = np.argsort(fitnesses)
+        new_population = [population[i] for i in sorted_indices[:ELITE_SIZE]]
 
         # Selection
         selected = selection(population, fitnesses)
@@ -161,17 +243,60 @@ def genetic_algorithm():
     plt.plot(best_fitness_history, label='Best Fitness')
     plt.plot(avg_fitness_history, label='Average Fitness')
     plt.xlabel('Generation')
-    plt.ylabel('Fitness (Weight)')
+    plt.ylabel('Fitness (Weight in kg)')
     plt.title('Genetic Algorithm Optimization')
     plt.legend()
     plt.savefig('fitness_history.png')
     plt.close()
 
-    return best_individual, best_weight
+    return best_individual, best_weight, fitnesses[best_index]
+
+def analyze_optimal_design(individual):
+    # Build stiffness matrix
+    K = build_stiffness_matrix(individual)
+    
+    # Build load vector
+    F = np.zeros(2 * num_nodes)
+    for node, load in loads.items():
+        F[2*node] = load[0]
+        F[2*node+1] = load[1]
+    
+    # Define fixed degrees of freedom
+    fixed_dofs = []
+    for node in supports:
+        fixed_dofs.extend([2*node, 2*node+1])
+    
+    # Apply boundary conditions
+    K_mod, F_mod = apply_boundary_conditions(K, F, fixed_dofs)
+    
+    # Solve for displacements
+    displacements = solve_displacements(K_mod, F_mod)
+    if displacements is None:
+        print("Failed to solve displacements for the optimal design.")
+        return
+    
+    # Calculate axial forces
+    axial_forces = calculate_axial_forces(individual, displacements)
+    
+    # Calculate stresses
+    stresses = axial_forces / individual  # σ = F / A
+    
+    # Display results
+    print("\nOptimal Design Analysis:")
+    for i, (force, stress) in enumerate(zip(axial_forces, stresses)):
+        print(f"Member {i+1} (Node {members[i][0]}-{members[i][1]}):")
+        print(f"  Cross-sectional Area = {individual[i]:.5f} m²")
+        print(f"  Axial Force = {force:.2f} N")
+        print(f"  Stress = {stress/1e6:.2f} MPa")
+    print(f"\nTotal Weight: {total_weight(individual):.2f} kg")
 
 if __name__ == "__main__":
-    best_design, best_weight = genetic_algorithm()
+    best_design, best_weight, _ = genetic_algorithm()
     print("\nOptimal Design:")
     for i, area in enumerate(best_design):
         print(f"Member {i+1} (Node {members[i][0]}-{members[i][1]}): Area = {area:.5f} m²")
     print(f"Total Weight: {best_weight:.2f} kg")
+    
+    # Analyze and display detailed information about the optimal design
+    analyze_optimal_design(best_design)
+
