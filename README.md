@@ -36,20 +36,4 @@ Structural optimization is a fundamental aspect of engineering design, aiming to
 
 - **Mechanical Engineering**: Creating efficient frameworks and supports for machinery and equipment, reducing costs and improving durability.
 
-## Setup and Installation
 
-### Prerequisites
-
-- **Python 3.x**: Ensure you have Python installed. You can download it from [Python's official website](https://www.python.org/downloads/).
-
-- **Required Libraries**:
-  - `numpy`
-  - `matplotlib`
-
-### Installation Steps
-
-1. **Clone the Repository**
-
-   ```bash
-   git clone https://github.com/yourusername/structural-optimization-ga.git
-   cd structural-optimization-ga
